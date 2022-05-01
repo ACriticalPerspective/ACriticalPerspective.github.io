@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>COVID-19 Outcomes</title>
+
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <script src='https://cdn.jsdelivr.net/npm/chart.js@3.6.2/dist/chart.min.js'>
+   </script>
+
+  <style>
+  * {
+    font-family: verdana;
+  }
+  .zoom-in,
+  .zoom-out {
+    border-style: none;
+    background-color: transparent;
+    padding: 0;
+    margin: 0;
+  }
+  .zoom-in img,
+  .zoom-out img {
+    width: 2em;
+    height: 2em;
+    padding: 0;
+    margin: 0;
+  }
+  .page-title {
+    margin-left: 3em;
+    margin-right: 3em;
+  }
+  h1,
+  h1 select {
+    font-size: 20pt;
+  }
+  .view {
+    padding-top: 1em;
+    padding-bottom: 1em;
+  }
+  .custom-number-people {
+    margin-top: 1em;
+    margin-bottom: 1em;
+  }
+  .view span,
+  .view select {
+    font-size: 16pt;
+  }
+  .graph {
+    min-height: 5em;
+    height: 70vh;
+
+    /* Display loader image when an art piece has NOT loaded */
+    background: no-repeat center 5em
+     url(/shared/img/components/loader_Spin-1s-edit-100px.svg);
+  }
+
+  preact-component {
+    display: block;
+  }
+
+  .menu-button {
+    display: block;
+    position: absolute;
+
+    height: 2em;
+    width: 2em;
+    margin-top: 1em;
+
+    z-index: 2;
+  }
+
+  #menu {
+    padding-bottom: 1em;
+
+    z-index: 0;
+  }
+  #content {
+    position: absolute;
+    top: 0;
+
+    background-color: white;
+    width: 100%;
+    z-index: 1;
+
+    transition: all 0.5s;
+  }
+  </style>
+
+  <script src='data.jsonp'></script>
+  <script type='module'>
+   import { html, render }
+    from 'https://unpkg.com/htm@3.1.0/preact/standalone.module.js';
+
+   window.html = html;
+
+   window.PreactComponent = class extends HTMLElement {
+     static generate(id, callback) {
+       const elem = document.getElementById(id);
+       render(callback(), elem);
+     }
+
+     async connectedCallback() {
+       this.innerHTML = '';
+     }
+   }
+   customElements.define('preact-component', window.PreactComponent);
+  </script>
+  <script type='module'>
+   // TODO:
+   // - Read parameters for initial display through url
+   // - Determine how to display information in graph as a percent (ie. passing
+   //    data "as is" to all components and, in graph component, dividing all
+   //    values by maxima in data supplied to graph and y-axis)
+   // - Display multiple data sets
+   // - Try to move script block inside react tag and have it be generated
+   //    using a reference to the tag instead of an ID
+   // - Change graph size when tablet is rotated
+   // - Look into making graph readjust size when console (F12) is opened or
+   //    closed (probably related to rotated tablet view problem)
+
+   import {
+    html, render, useState, useRef, useEffect, useCallback
+   } from 'https://unpkg.com/htm@3.1.0/preact/standalone.module.js';
+
+   const DEBUG = false;
+   function debug(msg) {
+     if (!DEBUG) {
+       return; // ABORT
+     }
+     console.log(msg);
+   }
+
+   const walk = (obj, callback) => {
+     const objs = Array.isArray(obj) ? obj
+      : typeof(obj) === 'object' ? Object.values(obj)
+      : [];
+
+     for (const o of objs) {
+       walk(o, callback);
+     }
+
+     callback(obj);
+   }
+
+   const objectsEqual = (o1, o2) => {
+     const keys = Object.keys(o1);
+
+     return keys.length === Object.keys(o2).length &&
+      keys.reduce((matches, key) => matches && o1[key] === o2[key], true);
+   };
+
+   const convertNumber = (num, oldMin, oldMax, newMin, newMax) => {
+     if (oldMin === oldMax) {
+       throw new Error(
+        `convertNumber: oldMin and oldMax are the same value: ${oldMin}`
+       );
+     }
+
+     const oldRange = (oldMax - oldMin);
+     const newRange = (newMax - newMin);
+     const newValue = (((num - oldMin) * newRange) / oldRange) + newMin;
+
+     return newValue;
+   }
+
+   const Component = ({
+    initialAge='All Ages', initialDisplay='best-fit-cases', initialYAxis,
+    initialData, initialRollingDailyAverage = 1, graphs = [ 'outcomes' ],
+    children
+   }) => {
+     const graph = useRef();
+
+     //
+     // Generate data for outcome graph in percent format
+     //
+
+     const outcomesAsPercent = JSON.parse(JSON.stringify(initialData.outcomes));
+     initialData.outcomesAsPercent = outcomesAsPercent;
+
+     const rollingDailyAverages = Object.keys(outcomesAsPercent.datasets);
+
+     for (const rollingDailyAverage of rollingDailyAverages) {
+       const max = initialData.outcomes
+        .maxima[rollingDailyAverage]['All Ages']['Total Cases'];
+
+       walk(outcomesAsPercent.datasets[rollingDailyAverage], (obj) => {
+         if (!obj.data) {
+           return; // DONE
+         }
+         obj.data = obj.data.map((val) => 100 * val / max);
+       });
+       walk(outcomesAsPercent.maxima[rollingDailyAverage], (obj) => {
+         if (!obj.Died) {
+           return; // DONE
+         }
+         Object.keys(obj).reduce(
+          (o, k) => { o[k] = 100 * obj[k] / max; return o; }, obj
+         );
+       });
+       walk(outcomesAsPercent.minima[rollingDailyAverage], (obj) => {
+         if (!obj.Died) {
+           return; // DONE
+         }
+         Object.keys(obj).reduce(
+          (o, k) => { o[k] = 100 * obj[k] / max; return o; }, obj
+         );
+       });
+     }
+
+
+
+     const hasRunBefore = useRef(false);
+     const [isMenuOpen, setIsMenuOpen] = useState(false);
+     const [data, setData] = useState(initialData);
+
+     const ageOptions = {
+      'All Ages': 'of All Ages',
+      '<20': 'Younger Than 20',
+      '20s': 'in Their 20s',
+      '30s': 'in Their 30s',
+      '40s': 'in Their 40s',
+      '50s': 'in Their 50s',
+      '60s': 'in Their 60s',
+      '70s': 'in Their 70s',
+      '80s': 'in Their 80s',
+      '90+': '90 and Older'
+     };
+
+     const displayOptions = {
+      'best-fit-cases': 'Focus on most daily cases',
+      'best-fit-deaths': 'Focus on most daily deaths',
+      'custom': 'Custom display'
+     };
+
+     const rollingDailyAverageOptions = {
+      1: 'No', 7: 'a 7 Day', 14: 'a 14 Day', 28: 'a 28 Day'
+     };
+
+     const createView = useCallback(({
+      age = 'All ages', display = 'best-fit-cases', yAxisMax,
+      rollingDailyAverage = 1, graphs
+     }) => {
+       const graphView = graphs.find((i) => i === 'outcomes') ?
+        'outcomes' : 'outcomesAsPercent';
+
+       const mostDailyCasesForAge =
+        data[graphView].maxima[rollingDailyAverage][age]['Total Cases'];
+       const mostDailyDeathsForAge =
+        data[graphView].maxima[rollingDailyAverage][age]['Died'];
+
+       let newYAxis;
+
+       switch (display) {
+       case 'best-fit-cases':
+         newYAxis = mostDailyCasesForAge;
+         break;
+
+       case 'best-fit-deaths':
+         newYAxis = mostDailyDeathsForAge;
+         break;
+
+       default:
+         newYAxis = yAxisMax;
+       }
+
+       const newView =
+        { age, display, yAxisMax: newYAxis, rollingDailyAverage, graphs };
+
+       // DEBUG
+       debug('Component: function: createView: ' + // DEBUG
+        '{ $display, $age, $yAxisMax }: ' + // DEBUG
+        JSON.stringify(newView)); // DEBUG
+
+       return newView;
+     }, []);
+
+     const [view, setView] = useState(
+      hasRunBefore.current ? null :
+       createView({
+        age: initialAge, display: initialDisplay, yAxisMax: initialYAxis,
+        rollingDailyAverage: initialRollingDailyAverage, graphs
+       })
+     );
+
+     // DEBUG
+     debug('Component: $view: ' + // DEBUG
+      JSON.stringify(view)); // DEBUG
+
+
+     const changeView = useCallback((newView) => {
+       // DEBUG
+       debug('Component: function: changeView: $view ' + // DEBUG
+        '(original view): ' + // DEBUG
+        JSON.stringify(view)); // DEBUG
+
+       newView = createView({ ...view, ...newView });
+
+       // DEBUG
+       debug('Component: function: changeView: $newView ' + // DEBUG
+        '(new view): ' + // DEBUG
+        JSON.stringify(newView)); // DEBUG
+
+       const viewUnchanged = objectsEqual(view, newView);
+       if (viewUnchanged) {
+         return; // ABORT
+       }
+
+       setView({ ...newView });
+     }, [view]);
+
+
+     const props = {
+      isMenuOpen, setIsMenuOpen,
+      data, graph,
+      view, changeView,
+      ageOptions, displayOptions, rollingDailyAverageOptions
+     };
+
+     const childrenList = (Array.isArray(children) ? children : [children]);
+     const newChildren = childrenList.map((component) => {
+       if (typeof(component.type) !== 'function') {
+         return child;
+       }
+
+       return html`<${component.type} ...${props} ...${component.props} />`;
+     });
+
+     hasRunBefore.current = true;
+
+     return html`${newChildren}`;
+   };
+
+   const Graph = ({ data, graph, view, height }) => {
+     const canvas = useRef();
+     const lastView = useRef();
+
+     useEffect(() => {
+       if (height) {
+         canvas.current.style.height = height;
+       }
+     }, []);
+
+     useEffect(() => {
+       // Age and maximum value for the y-axis are unchanged (which are the
+       //  only view properties that are used to display the graph)
+       if (
+        lastView.current &&
+        lastView.current.rollingDailyAverage === view.rollingDailyAverage &&
+        lastView.current.age === view.age &&
+        lastView.current.yAxisMax === view.yAxisMax &&
+        lastView.current.graphs === view.graphs
+       ) {
+         return; // DO NOTHING
+       }
+       lastView.current = { ...view };
+
+       // A graph is being displayed
+       if (graph.current) {
+         // Remove the graph being displayed
+         graph.current.destroy();
+       }
+
+       const graphView = view.graphs.find((i) => i === 'outcomes') ?
+        'outcomes' : 'outcomesAsPercent';
+
+       const yAxisText = view.graphs.find((i) => i === 'outcomes') ?
+        'Number of People' : 'Percent People Infected (that Day)';
+
+       graph.current = new Chart(canvas.current, {
+        type: 'bar',
+        data: {
+         labels: data.outcomes['labels'],
+         datasets: [
+          ...data[graphView].datasets[view.rollingDailyAverage][view.age]
+         ]
+        },
+        plugins: [
+         {
+          id: 'custom_canvas_background_color',
+          beforeDraw: (chart) => {
+            const ctx = chart.canvas.getContext('2d');
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, chart.width, chart.height);
+            ctx.restore();
+          }
+         }
+        ],
+        options: {
+         animation: {
+          duration: 0
+         },
+         /*plugins: {
+          display: true,
+          legend: {
+            position: 'bottom'
+          },
+         },*/
+         scales: {
+          x: {
+           title: {
+            display: true,
+            text: 'Accurate Episode Date',
+           },
+           stacked: true
+          },
+          y: {
+           title: {
+            display: true,
+            text: yAxisText,
+           },
+           stacked: true,
+           max: view.yAxisMax - 0
+          }
+         }
+        }
+       });
+
+       // DEBUG
+       debug('Graph: $view: ' + // DEBUG
+        JSON.stringify(view)); // DEBUG
+
+     }, [view]);
+
+     return html`
+      <div class='graph' style='position: relative'>
+        <canvas ref=${canvas} ...${{ height }}></canvas>
+      </div>
+     `;
+   };
+
+   const RollingDailyAverageSelect = ({
+    view, changeView, rollingDailyAverageOptions
+   }) => {
+     const options = rollingDailyAverageOptions;
+
+     const onChange = (evt) => {
+       const value = { rollingDailyAverage: evt.target.value };
+
+       // DEBUG
+       debug('_EVENT_ RollingDailyAverageSelect: ' + // DEBUG
+        'function: onChange: ' + // DEBUG
+        value); // DEBUG
+
+       changeView(value);
+     };
+
+     // DEBUG
+     debug('RollingDailyAverageSelect: $view: ' + // DEBUG
+      JSON.stringify(view)); // DEBUG
+
+     return html`
+      <select onChange=${onChange} value=${view.rollingDailyAverage}>
+       ${Object.keys(options).map((val) => html`
+        <option key=${val} value=${val}>
+          ${options[val].toLowerCase()}
+         </option>
+       `)}
+      </select>
+     `;
+   };
+
+   const AgeSelect = ({ view, changeView, ageOptions }) => {
+     const onChange = (evt) => {
+       const value = { age: evt.target.value };
+
+       // DEBUG
+       debug('_EVENT_ AgeSelect: function: onChange: ' + // DEBUG
+        value); // DEBUG
+
+       changeView(value);
+     };
+
+     // DEBUG
+     debug('AgeSelect: $view: ' + // DEBUG
+      JSON.stringify(view)); // DEBUG
+
+     return html`
+      <select onChange=${onChange} value=${view.age}>
+       ${Object.keys(ageOptions).map((val) => html`
+        <option key=${val} value=${val}>
+          ${ageOptions[val].toLowerCase()}
+        </option>
+       `)}
+      </select>
+     `;
+   };
+
+   const NumberPeopleRange = ({ data, graph, view, changeView, width }) => {
+     // DEBUG
+     debug('NumberPeopleRange: $view: ' + // DEBUG
+      JSON.stringify(view)); // DEBUG
+
+     const isPercent = !view.graphs.find((i) => i === 'outcomes');
+
+     let mostDailyCases = 0;
+     walk(data.outcomes.maxima, (obj) => {
+       if (!obj['Total Cases']) {
+         return; // SKIP
+       }
+       mostDailyCases = Math.max(...[mostDailyCases, ...Object.values(obj)]);
+     });
+
+     let leastDailyCases = mostDailyCases;
+     walk(data.outcomes.minima, (obj) => {
+       if (!obj.Died) {
+         return; // SKIP
+       }
+       leastDailyCases = Math.min(...[leastDailyCases, ...Object.values(obj)]);
+     });
+
+     const min = leastDailyCases;
+     const max = mostDailyCases;
+
+     const minPercent = 100 * leastDailyCases / mostDailyCases;
+
+     const value = !isPercent ? view.yAxisMax :
+      convertNumber(view.yAxisMax,
+       minPercent,100, leastDailyCases,mostDailyCases);
+
+
+     const range = useRef();
+
+     useEffect(() => {
+       const bodyStyles = window.getComputedStyle(document.body);
+
+       const zoomInBtnStyles = window.getComputedStyle(
+        document.querySelector('button.zoom-in'));
+
+       const zoomOutBtnStyles = window.getComputedStyle(
+        document.querySelector('button.zoom-out'));
+
+       const styleToNum = (style) => {
+         const num = style.match('^[0-9]*')[0];
+         return num - 0;
+       }
+
+       const bodyAdjustments =
+        ['margin-right', 'margin-left', 'padding-right', 'padding-left']
+        .map((property) => styleToNum(bodyStyles[property]))
+        .reduce((total, num) => total + num);
+
+       const zoomInBtnAdjustments = 
+        [
+         'margin-right', 'margin-left', 'padding-right', 'padding-left', 'width'
+        ]
+        .map((property) => styleToNum(zoomInBtnStyles[property]))
+        .reduce((total, num) => total + num);
+
+       const zoomOutBtnAdjustments = 
+        [
+         'margin-right', 'margin-left', 'padding-right', 'padding-left', 'width'
+        ]
+        .map((property) => styleToNum(zoomOutBtnStyles[property]))
+        .reduce((total, num) => total + num);
+
+       const zoomBtnAdjustments = zoomInBtnAdjustments + zoomOutBtnAdjustments;
+
+       range.current.style.width =
+        `calc(${width} - ${bodyAdjustments}px - ${zoomBtnAdjustments}px)`;
+     }, []);
+
+     const onInput = (evt) => {
+       // A graph is being displayed
+       if (graph.current) {
+         // Remove the graph being displayed
+         graph.current.destroy();
+       }
+
+       const value = !isPercent ?
+        evt.target.value :
+        convertNumber(evt.target.value,
+         leastDailyCases,mostDailyCases, minPercent,100);
+
+       // DEBUG
+       debug('_EVENT_ NumberPeopleRange: function: change: ' + // DEBUG
+        value); // DEBUG
+
+       changeView({ display: 'custom', yAxisMax: value - 0 });
+     };
+
+     return html`
+      <div class='custom-number-people'>
+      <button class='zoom-in'>
+        <img src='./img/ios-add-circle-outline.svg' />
+      </button>
+      <input type='range' ref=${range} ...${{ min, max, value, onInput }} />
+      <button class='zoom-out'>
+        <img src='./img/ios-remove-circle-outline.svg' />
+      </button>
+      </div>
+     `;
+   };
+
+   const DisplaySelect = ({
+    view, changeView, displayOptions, ageOptions, rollingDailyAverageOptions
+   }) => {
+     let rdaOptions = { ...rollingDailyAverageOptions };
+
+     // DEBUG
+     debug('DisplaySelect: $view: ' + // DEBUG
+      JSON.stringify(view)); // DEBUG
+
+     const onChange = (evt) => {
+       const value = evt.target.value;
+
+       // DEBUG
+       debug('_EVENT_ DisplaySelect: function: onChange: ' + // DEBUG
+        value); // DEBUG
+
+       changeView({ display: value });
+     };
+
+     const options = { ...displayOptions };
+     options['custom'] =
+      'Use the slider to choose the number of people displayed';
+
+     return html`
+      <div class='view'>
+      <select onChange=${onChange} value=${view.display}>
+       ${Object.keys(options).map((val) => html`
+        <option key=${val} value=${val}>
+         ${options[val]}
+        </option>
+       `)}
+      </select>
+      <span>
+       ${' '}for people${' '}
+       <${Outcome.AgeSelect} ...${{view, changeView, ageOptions}} />
+      </span>
+      <span>${' '}(using${' '}</span>
+      <${RollingDailyAverageSelect} rollingDailyAverageOptions=${rdaOptions}
+       ...${{ changeView, view }} />
+      <span>${' '}rolling daily average)</span>
+      </div>
+     `;
+   };
+
+   const MenuButton = ({ view, isMenuOpen, setIsMenuOpen }) => {
+     const onClick = (evt) => {
+       const menuElem = document.getElementById('menu');
+       const contentElem = document.getElementById('content');
+
+       if (isMenuOpen) {
+         contentElem.style['margin-top'] = '0';
+         document.body.classList.remove('menu-open');
+       } else {
+         contentElem.style['margin-top'] = `${menuElem.offsetHeight}px`;
+         document.body.classList.add('menu-open');
+       }
+
+       setIsMenuOpen(!isMenuOpen);
+     };
+
+     return html`
+      <a href='#'>
+        <img class='menu-button' src='./img/md-menu.svg' ...${{ onClick }} />
+      </a>
+     `;
+   }
+
+   window.Outcome = {
+    Component, Graph, MenuButton,
+    AgeSelect, DisplaySelect, RollingDailyAverageSelect,
+    NumberPeopleRange
+   };
+  </script>
+</head>
+<body>
+<!-- TESTING:
+<body class='menu-open'>
+-->
+
+  <preact-component id='outcome-graph' style='heght: 70vh'>
+  <img src='/shared/img/components/loader_Spin-1s-edit-100px.svg' />
+  <script type='module'>
+  const data = getData();
+
+  PreactComponent.generate('outcome-graph', () => {
+    return html`
+    <${Outcome.Component} initialData=${data}>
+     <${(props) => html`
+      <div id='menu'>
+        <!--
+        Rolling Daily Average:
+        <{Outcome.RollingDailyAverageSelect} ...${props} />
+        -->
+
+        <${Outcome.DisplaySelect} ...${props} />
+      </div>
+
+      <div id='content'>
+        <${Outcome.MenuButton} ...${props} />
+
+        <!-- TITLE -->
+        <div class='page-title'>
+          <h1 style='text-align: center'>
+           Outcomes for People with COVID-19 in Ontario${' '}
+
+           ${props.isMenuOpen ?
+             props.ageOptions[props.view.age] :
+             html`<${Outcome.AgeSelect} ...${props} />`}
+
+           ${props.view.rollingDailyAverage-0 === 1 ? '' :
+            ' (Using '+
+            props.rollingDailyAverageOptions[props.view.rollingDailyAverage]+
+            ' Rolling Daily Average)'}
+
+          </h1>
+        </div>
+
+        <${Outcome.NumberPeopleRange} width='100%' ...${props} />
+
+        <${Outcome.Graph} height='70vh' ...${props} />
+
+        <div>
+          Data Source:
+          <a href="https://data.ontario.ca/dataset/confirmed-positive-cases-of-covid-19-in-ontario">
+          Confirmed positive cases of COVID-19 in Ontario
+          </a>
+        </div>
+      </div>
+     `} />
+    </>
+    `;
+  });
+  </script>
+</body>
+</html>
+
