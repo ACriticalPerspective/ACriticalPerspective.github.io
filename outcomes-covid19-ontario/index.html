@@ -680,6 +680,9 @@
   const data = getData();
 
   PreactComponent.generate('outcome-graph', () => {
+    const labels = data.outcomes.labels;
+    const lastDate = labels[labels.length-1];
+
     return html`
     <${Outcome.Component} initialData=${data}>
      <${(props) => html`
@@ -721,6 +724,10 @@
           <a href="https://data.ontario.ca/dataset/confirmed-positive-cases-of-covid-19-in-ontario">
           Confirmed positive cases of COVID-19 in Ontario
           </a>
+        </div>
+
+        <div>
+          Last updated: <span id='last-updated'>${lastDate}</span>
         </div>
       </div>
      `} />
